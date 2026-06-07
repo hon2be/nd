@@ -118,10 +118,10 @@ async function main(): Promise<void> {
       break;
     }
     case 'break': {
-      // 형식: nd break <file>:<line>
+      // 형식: nd break <file>:<line> [--if "<expr>"]
       const spec = rest[1];
       if (!spec) {
-        process.stderr.write('usage: nd break <file>:<line>\n');
+        process.stderr.write('usage: nd break <file>:<line> [--if "<expr>"]\n');
         process.exit(1);
       }
       const colon = spec.lastIndexOf(':');
@@ -135,11 +135,35 @@ async function main(): Promise<void> {
         process.stderr.write('line must be a number\n');
         process.exit(1);
       }
-      await passThrough(socketPath, { cmd: 'break', args: { file, line }});
+      // --if 옵션 파싱
+      let condition: string | undefined;
+      const ifIdx = rest.indexOf('--if');
+      if (ifIdx >= 0 && rest[ifIdx + 1]) condition = rest[ifIdx + 1] as string;
+      await passThrough(socketPath, { cmd: 'break', args: { file, line, ...(condition ? { condition } : {}) }});
       break;
     }
     case 'continue': {
       await passThrough(socketPath, { cmd: 'continue' });
+      break;
+    }
+    case 'step': {
+      // nd step [over|in|out], 기본 over
+      const mode = rest[1] ?? 'over';
+      if (!['over', 'in', 'out'].includes(mode)) {
+        process.stderr.write('usage: nd step [over|in|out]\n');
+        process.exit(1);
+      }
+      await passThrough(socketPath, { cmd: 'step', args: { mode }});
+      break;
+    }
+    case 'locals': {
+      // nd locals [--frame N] [--all]
+      let frame = 0;
+      let all = false;
+      const fi = rest.indexOf('--frame');
+      if (fi >= 0 && rest[fi + 1]) frame = Number(rest[fi + 1]);
+      if (rest.includes('--all')) all = true;
+      await passThrough(socketPath, { cmd: 'locals', args: { frame, ...(all ? { all: true } : {}) }});
       break;
     }
     case 'scripts': {

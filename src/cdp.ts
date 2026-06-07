@@ -10,6 +10,16 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { buildScriptMap, originalToGenerated, generatedToOriginal, type ScriptMap } from './source-map-index.js';
 
+/** 한 scope의 메타정보. locals 명령 처리 시 사용. */
+export interface ScopeInfo {
+  /** 'local' | 'closure' | 'block' | 'catch' | 'global' | 'with' | 'eval' | 'module' | 'script' */
+  readonly type: string;
+  /** scope 객체를 가리키는 CDP ID — Runtime.getProperties로 변수 목록 얻기 */
+  readonly objectId: string;
+  /** 사람용 이름 (closure는 함수명) */
+  readonly name?: string;
+}
+
 /** 멈췄을 때 호출 프레임 한 개. */
 export interface CallFrame {
   /** CDP가 부여한 프레임 ID — Runtime.evaluate 호출 시 callFrameId로 사용 */
@@ -29,6 +39,8 @@ export interface CallFrame {
     readonly line: number;
     readonly column: number;
   } | null;
+  /** 이 프레임의 스코프 체인 (가장 가까운 local부터 바깥쪽 global까지) */
+  readonly scopes: readonly ScopeInfo[];
 }
 
 /** Debugger.paused 이벤트의 정리된 형태. */
@@ -184,6 +196,16 @@ export class CdpClient {
       const lineNumber = loc['lineNumber'] as number;
       const columnNumber = loc['columnNumber'] as number;
       const orig = generatedToOriginal(scriptId, lineNumber, columnNumber, maps);
+      // scopeChain 추출 — 각 scope의 objectId로 나중에 변수 펼치기
+      const rawScopes = (f['scopeChain'] as Array<Record<string, unknown>>) ?? [];
+      const scopes: ScopeInfo[] = rawScopes.map((s) => {
+        const obj = (s['object'] as Record<string, unknown>) ?? {};
+        return {
+          type: (s['type'] as string) ?? 'unknown',
+          objectId: (obj['objectId'] as string) ?? '',
+          name: s['name'] as string | undefined,
+        };
+      }).filter((s) => s.objectId);
       return {
         callFrameId: f['callFrameId'] as string,
         functionName: fn,
@@ -194,6 +216,7 @@ export class CdpClient {
           columnNumber,
         },
         originalLocation: orig,
+        scopes,
       };
     });
     const info: PausedInfo = {
@@ -256,30 +279,22 @@ export class CdpClient {
    * Node가 source map을 자동으로 풀어주므로 .ts 파일의 줄 번호 그대로 사용 가능.
    * lineNumber는 0-based임에 주의 (사람이 쓰는 줄번호는 1-based이니 -1).
    */
-  public async setBreakpoint(absPath: string, oneBasedLine: number): Promise<{ id: string; resolvedLine?: number; scriptId?: string }> {
-    // 1) 우리가 가진 모든 source map에서 (absPath, line) → (scriptId, jsLine, jsColumn) 변환 시도.
-    //    트랜스파일된 스크립트는 보통 한 줄로 압축돼있으므로 source map 없이는 정확한 위치 못 찾음.
+  public async setBreakpoint(absPath: string, oneBasedLine: number, condition?: string): Promise<{ id: string; resolvedLine?: number; scriptId?: string }> {
+    // 1) source map 기반 — 트랜스파일된 스크립트의 정확한 위치로 변환.
     const mapped = originalToGenerated(absPath, oneBasedLine, Array.from(this.scriptMaps.values()));
     if (mapped.length > 0) {
       const chosen = mapped[0]!;
-      const result = await this.sendCdp('Debugger.setBreakpoint', {
-        location: chosen,
-      }) as { breakpointId: string; actualLocation: { lineNumber: number } };
-      return {
-        id: result.breakpointId,
-        resolvedLine: oneBasedLine,  // 원본 기준 줄
-        scriptId: chosen.scriptId,
-      };
+      const params: Record<string, unknown> = { location: chosen };
+      if (condition) params['condition'] = condition;
+      const result = await this.sendCdp('Debugger.setBreakpoint', params) as { breakpointId: string; actualLocation: { lineNumber: number } };
+      return { id: result.breakpointId, resolvedLine: oneBasedLine, scriptId: chosen.scriptId };
     }
-    // 2) source map이 없으면 (예: 순수 .js 파일) URL 기반 fallback
+    // 2) source map 없을 때 URL 기반 fallback
     const url = `file://${absPath}`;
-    const result = await this.sendCdp('Debugger.setBreakpointByUrl', {
-      url,
-      lineNumber: oneBasedLine - 1,
-    }) as { breakpointId: string; locations: Array<{ lineNumber: number }> };
-    const resolvedLine = result.locations[0]?.lineNumber !== undefined
-      ? result.locations[0]!.lineNumber + 1
-      : undefined;
+    const params: Record<string, unknown> = { url, lineNumber: oneBasedLine - 1 };
+    if (condition) params['condition'] = condition;
+    const result = await this.sendCdp('Debugger.setBreakpointByUrl', params) as { breakpointId: string; locations: Array<{ lineNumber: number }> };
+    const resolvedLine = result.locations[0]?.lineNumber !== undefined ? result.locations[0]!.lineNumber + 1 : undefined;
     return { id: result.breakpointId, resolvedLine };
   }
 
@@ -304,6 +319,68 @@ export class CdpClient {
     return new Promise((resolve) => {
       this.pausedWaiters.push(resolve);
     });
+  }
+
+  /**
+   * 현재 멈춤을 step over로 진행 (다음 줄까지, 함수 호출은 건너뜀).
+   * 다음 paused 또는 종료까지 await.
+   */
+  public async stepOver(): Promise<PausedInfo | null> {
+    return await this.stepAndWait('Debugger.stepOver');
+  }
+
+  /** step into — 다음 함수 호출 안으로 들어감. */
+  public async stepInto(): Promise<PausedInfo | null> {
+    return await this.stepAndWait('Debugger.stepInto');
+  }
+
+  /** step out — 현재 함수 빠져나가서 호출자로 돌아갈 때까지. */
+  public async stepOut(): Promise<PausedInfo | null> {
+    return await this.stepAndWait('Debugger.stepOut');
+  }
+
+  /** step 계열 공통 — CDP step 명령 보내고 다음 paused 또는 종료 대기. */
+  private async stepAndWait(method: 'Debugger.stepOver' | 'Debugger.stepInto' | 'Debugger.stepOut'): Promise<PausedInfo | null> {
+    if (this.exited) return null;
+    if (!this.currentPaused) throw new Error('not paused — step requires a paused state');
+    const waitPromise = this.waitForPaused();
+    await this.sendCdp(method);
+    return await waitPromise;
+  }
+
+  /**
+   * 지정 프레임의 모든 스코프 변수 한 번에 펼친다.
+   *
+   * @remarks
+   * scopeChain의 각 scope에 대해 Runtime.getProperties를 호출해서 변수 목록을 모음.
+   * local scope만 보고 싶으면 caller가 결과에서 필터.
+   *
+   * @returns scope별 변수 목록
+   */
+  public async getFrameLocals(frameIndex: number = 0): Promise<Array<{ scope: string; variables: Array<{ name: string; value: unknown }> }>> {
+    if (!this.currentPaused) throw new Error('not paused');
+    const frame = this.currentPaused.frames[frameIndex];
+    if (!frame) throw new Error(`no frame ${frameIndex}`);
+    const out: Array<{ scope: string; variables: Array<{ name: string; value: unknown }> }> = [];
+    for (const scope of frame.scopes) {
+      // global은 너무 노이즈가 크니 건너뜀
+      if (scope.type === 'global') continue;
+      const result = await this.sendCdp('Runtime.getProperties', {
+        objectId: scope.objectId,
+        ownProperties: true,
+        accessorPropertiesOnly: false,
+        generatePreview: true,
+      }) as { result: Array<{ name: string; value?: { type: string; value?: unknown; description?: string }; get?: unknown }> };
+      const variables = result.result
+        // accessor(get만 있고 value 없음)는 호출 비용 있어서 v0에선 제외
+        .filter((p) => p.value !== undefined)
+        .map((p) => ({
+          name: p.name,
+          value: p.value?.value !== undefined ? p.value.value : (p.value?.description ?? `[${p.value?.type}]`),
+        }));
+      out.push({ scope: scope.name ? `${scope.type}(${scope.name})` : scope.type, variables });
+    }
+    return out;
   }
 
   /**

@@ -115,16 +115,36 @@ async function main(): Promise<void> {
         case 'break': {
           const file = req.args?.['file'] as string | undefined;
           const line = req.args?.['line'] as number | undefined;
+          const condition = req.args?.['condition'] as string | undefined;
           if (!file || !line) return { status: 'error', message: 'break requires args.file and args.line' };
           const absFile = isAbsolute(file) ? file : resolve(baseCwd, file);
-          const r = await cdp.setBreakpoint(absFile, line);
-          return { status: 'ok', data: { breakpointId: r.id, file: absFile, requestedLine: line, resolvedLine: r.resolvedLine }};
+          const r = await cdp.setBreakpoint(absFile, line, condition);
+          return { status: 'ok', data: { breakpointId: r.id, file: absFile, requestedLine: line, resolvedLine: r.resolvedLine, condition }};
         }
 
         case 'continue': {
           const p = await cdp.continueAndWait();
           if (!p) return { status: 'ok', data: { exited: true, exit: cdp.getExitState() }};
           return { status: 'ok', data: { paused: summarizePaused(p) }};
+        }
+
+        case 'step': {
+          const mode = (req.args?.['mode'] as string | undefined) ?? 'over';
+          let p: PausedInfo | null;
+          if (mode === 'in') p = await cdp.stepInto();
+          else if (mode === 'out') p = await cdp.stepOut();
+          else p = await cdp.stepOver();
+          if (!p) return { status: 'ok', data: { exited: true, exit: cdp.getExitState() }};
+          return { status: 'ok', data: { paused: summarizePaused(p) }};
+        }
+
+        case 'locals': {
+          const frameIndex = (req.args?.['frame'] as number | undefined) ?? 0;
+          const all = await cdp.getFrameLocals(frameIndex);
+          // local 스코프만 보여줌이 기본. ?all=true면 closure/script까지.
+          const includeAll = req.args?.['all'] === true;
+          const filtered = includeAll ? all : all.filter((s) => s.scope.startsWith('local') || s.scope.startsWith('block') || s.scope.startsWith('catch'));
+          return { status: 'ok', data: { frame: frameIndex, scopes: filtered }};
         }
 
         case 'eval': {
