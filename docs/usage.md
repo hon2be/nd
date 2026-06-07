@@ -91,6 +91,59 @@ nd wait --timeout 30
 
 `condition`은 V8 break condition (JS 표현식). true일 때만 멈춤.
 
+## tracepoint 모드 (`nd autorun`)
+
+긴 파이프라인을 디버거 stop 없이 끝까지 가게 하면서 **특정 시점의 변수만 자동 캡처**하고 싶을 때. 사람 개입 없이 hit → eval → resume → 다음 hit 반복.
+
+```json
+// .nd/checkpoints.json — capture와 break 옵션 추가
+[
+  {
+    "file": "src/api/handler.ts",
+    "line": 42,
+    "label": "after-fetch",
+    "capture": [
+      "response.status",
+      "JSON.stringify(payload).slice(0, 200)"
+    ]
+  },
+  {
+    "file": "src/api/handler.ts",
+    "line": 80,
+    "label": "before-response",
+    "capture": ["result.id", "result.userCount"],
+    "break": true                                     // ← 이 hit은 멈춤 모드
+  }
+]
+```
+
+```bash
+nd run server.ts
+nd resume
+nd autorun .nd/checkpoints.json --output /tmp/trace.jsonl --timeout-sec 600
+```
+
+동작:
+- `break`가 없거나 `false` → 자동으로 capture 표현식들 eval → JSONL에 한 줄 기록 → 자동 resume → 다음 hit 대기.
+- `break: true` → capture까지는 같지만 그 hit에서 **autorun 종료**. 자식 프로그램은 paused 상태 유지. 사용자가 `nd eval` / `nd locals` / `nd step` / `nd continue` 자유롭게 사용 가능. 끝나면 `nd continue` 로 풀거나 새 `nd autorun` 호출로 재진입.
+
+trace 결과 (JSONL 한 줄당 하나의 이벤트):
+
+```json
+{"ts":"...", "kind":"autorun-start", "registered":2}
+{"ts":"...", "kind":"hit", "label":"after-fetch", "captures":[{"expr":"response.status","result":200}, ...]}
+{"ts":"...", "kind":"hit-break", "label":"before-response", "captures":[...]}
+{"ts":"...", "kind":"autorun-end", "stoppedBySignal":false}
+```
+
+`kind` 종류: `autorun-start` / `hit` / `hit-break` / `timeout-no-hit` / `program-exited` / `wait-error` / `resume-error` / `autorun-end`.
+
+용도 가이드:
+- **회귀 검증** (회차마다 같은 지점 데이터 비교) → autorun
+- **장시간 파이프라인의 중간 상태 캡처** → autorun (디버거 stop이 서버 죽이는 환경에서 특히)
+- **새 결함의 즉흥 탐색** → traditional `nd break + wait + eval + step`
+- **특정 한 지점만 정밀 inspect, 다른 지점은 자동** → autorun + `"break": true` 혼합
+
 ## 명령 한눈에
 
 ```

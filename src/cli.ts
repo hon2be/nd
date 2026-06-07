@@ -117,6 +117,124 @@ async function main(): Promise<void> {
       await passThrough(socketPath, { cmd: 'ping' });
       break;
     }
+    case 'autorun': {
+      // 트레이스포인트 모드: preset JSON 등록 후 paused 이벤트마다 capture 표현식 자동 eval +
+      // 결과를 append 모드로 jsonl에 기록 + 자동 resume. 프로그램 종료 또는 외부 중단까지 반복.
+      //
+      // preset JSON 항목 (확장):
+      //   { file, line, label?, condition?, capture?: string[], break?: boolean }
+      // capture가 빈 배열이거나 누락이면 hit 시 메타정보만 기록 후 resume.
+      // break: true 이면 그 hit에서 autorun이 종료(자식은 paused 유지). 사용자가
+      // 직접 nd eval/locals/step/continue 자유 사용 후 새 autorun으로 재개 가능.
+      //
+      // 사용법: nd autorun <preset.json> [--output <jsonl>] [--timeout-sec <N>]
+      const path = rest[1];
+      if (!path) { process.stderr.write('usage: nd autorun <preset.json> [--output <jsonl>] [--timeout-sec <N>]\n'); process.exit(1); }
+      let outputPath: string | undefined;
+      let perHitTimeoutSec = 600;
+      const oi = rest.indexOf('--output');
+      if (oi >= 0 && rest[oi + 1]) outputPath = rest[oi + 1] as string;
+      const ti = rest.indexOf('--timeout-sec');
+      if (ti >= 0 && rest[ti + 1]) perHitTimeoutSec = Number(rest[ti + 1]);
+
+      const { readFileSync, appendFileSync } = await import('node:fs');
+      let items: Array<{ file: string; line: number; label?: string; condition?: string; capture?: string[]; break?: boolean }>;
+      try {
+        items = JSON.parse(readFileSync(path, 'utf-8'));
+      } catch (e) {
+        process.stderr.write(`[nd] cannot read/parse preset: ${e instanceof Error ? e.message : String(e)}\n`);
+        process.exit(1);
+      }
+
+      // preset 등록 (capture는 등록 자체에 영향 없음 — 데몬은 일반 preset으로 받음)
+      const registerResp = await sendRequest(socketPath, { cmd: 'preset', args: { items: items.map((i) => ({ file: i.file, line: i.line, label: i.label, condition: i.condition })) }});
+      if (registerResp.status !== 'ok') {
+        process.stderr.write(`[nd] preset register failed: ${registerResp.message ?? 'unknown'}\n`);
+        process.exit(1);
+      }
+      // breakpointId → {label, capture, break} 매핑 구축
+      const idToItem = new Map<string, { label?: string; capture?: string[]; break?: boolean }>();
+      const reg = registerResp.data as { results: Array<{ ok: boolean; breakpointId?: string; label?: string; line: number }> };
+      for (let i = 0; i < reg.results.length; i++) {
+        const r = reg.results[i];
+        if (!r?.ok || !r.breakpointId) continue;
+        idToItem.set(r.breakpointId, {
+          label: items[i]?.label ?? r.label,
+          capture: items[i]?.capture,
+          break: items[i]?.break ?? false,
+        });
+      }
+
+      const log = (rec: Record<string, unknown>): void => {
+        const line = JSON.stringify({ ts: new Date().toISOString(), ...rec });
+        if (outputPath) appendFileSync(outputPath, line + '\n');
+        process.stdout.write(line + '\n');
+      };
+
+      log({ kind: 'autorun-start', registered: idToItem.size });
+
+      // loop: wait → 결과 처리 → resume → 반복
+      // SIGINT/SIGTERM 받으면 graceful 종료
+      let stopped = false;
+      const onSig = (): void => { stopped = true; };
+      process.on('SIGINT', onSig);
+      process.on('SIGTERM', onSig);
+
+      while (!stopped) {
+        const waitResp = await sendRequest(socketPath, { cmd: 'wait', args: { timeoutMs: perHitTimeoutSec * 1000 }});
+        if (waitResp.status !== 'ok') {
+          log({ kind: 'wait-error', message: waitResp.message });
+          break;
+        }
+        const d = waitResp.data as { running?: boolean; exited?: boolean; paused?: { hitBreakpoints?: string[]; reason?: string; frames?: Array<{ functionName?: string; file?: string; line?: number }> } };
+        if (d.running) { log({ kind: 'timeout-no-hit' }); continue; }
+        if (d.exited) { log({ kind: 'program-exited' }); break; }
+        if (!d.paused) { log({ kind: 'unexpected-payload', d }); break; }
+
+        const bpId = d.paused.hitBreakpoints?.[0] ?? '';
+        const meta = idToItem.get(bpId) ?? {};
+        const captureResults: Array<{ expr: string; result?: unknown; error?: string }> = [];
+        for (const expr of meta.capture ?? []) {
+          const evalResp = await sendRequest(socketPath, { cmd: 'eval', args: { expr, frame: 0 }});
+          if (evalResp.status === 'ok') {
+            const data = evalResp.data as { result?: { value?: unknown; description?: string; subtype?: string }; exceptionDetails?: unknown };
+            if (data.exceptionDetails) {
+              captureResults.push({ expr, error: data.result?.description?.split('\n')[0] ?? 'error' });
+            } else {
+              captureResults.push({ expr, result: data.result?.value ?? data.result?.description });
+            }
+          } else {
+            captureResults.push({ expr, error: evalResp.message ?? 'eval-failed' });
+          }
+        }
+
+        log({
+          kind: meta.break ? 'hit-break' : 'hit',
+          label: meta.label,
+          breakpointId: bpId,
+          reason: d.paused.reason,
+          frame0: d.paused.frames?.[0],
+          captures: captureResults,
+        });
+
+        if (meta.break) {
+          // interactive break — autorun 종료. 자식은 paused 그대로 유지.
+          // 사용자가 nd eval/locals/step/continue 자유 사용 후 재진입 가능.
+          process.stderr.write(`[nd] paused at "${meta.label ?? bpId}" (interactive break). ` +
+            `Use 'nd eval/locals/step' freely, then 'nd continue' or restart autorun.\n`);
+          break;
+        }
+
+        // 자동 resume (멈춤만 풀고 다음 hit 대기로 돌아감)
+        const resumeResp = await sendRequest(socketPath, { cmd: 'resume' });
+        if (resumeResp.status !== 'ok') {
+          log({ kind: 'resume-error', message: resumeResp.message });
+          break;
+        }
+      }
+      log({ kind: 'autorun-end', stoppedBySignal: stopped });
+      break;
+    }
     case 'preset': {
       // nd preset <path-to-json>
       const path = rest[1];
