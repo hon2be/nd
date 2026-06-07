@@ -1,23 +1,56 @@
 {
-  "name": "nd",
+  "name": "@popsapple/nd",
   "version": "0.0.1",
-  "description": "Minimal CDP-based Node.js debugger CLI",
+  "description": "Minimal CDP-based Node.js debugger CLI — works with tsx, esbuild, and any source-mapped Node app",
   "type": "module",
   "bin": {
     "nd": "./bin/nd"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "debugger",
+    "node",
+    "cdp",
+    "chrome-devtools-protocol",
+    "typescript",
+    "tsx",
+    "source-map",
+    "breakpoint",
+    "cli"
+  ],
+  "author": "hon2be <saysun34@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hon2be/nd.git"
+  },
+  "homepage": "https://github.com/hon2be/nd#readme",
+  "bugs": {
+    "url": "https://github.com/hon2be/nd/issues"
+  },
+  "engines": {
+    "node": ">=20.6.0"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "source-map": "^0.7.6",
+    "tsx": "^4.21.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.12",
-    "tsx": "^4.21.0",
     "typescript": "^5.6.0"
   }
 }

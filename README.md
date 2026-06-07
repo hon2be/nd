@@ -19,8 +19,10 @@ Built because DAP-based tools (dap CLI, js-debug) don't reliably bind breakpoint
 ## Install
 
 ```bash
-npm install -g nd
+npm install -g @popsapple/nd
 ```
+
+(Package name on npm is `@popsapple/nd`, but the installed command is `nd`.)
 
 Or run from a clone:
 
