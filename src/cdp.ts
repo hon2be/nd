@@ -244,6 +244,11 @@ export class CdpClient {
     return this.currentPaused;
   }
 
+  /** 특정 breakpoint 제거. */
+  public async removeBreakpoint(id: string): Promise<void> {
+    await this.sendCdp('Debugger.removeBreakpoint', { breakpointId: id });
+  }
+
   /** CDP가 인식한 스크립트 URL 목록 (디버깅용). */
   public listScripts(): readonly { scriptId: string; url: string }[] {
     return Array.from(this.scripts.values());
@@ -312,6 +317,49 @@ export class CdpClient {
     const waitPromise = this.waitForPaused();
     await this.sendCdp('Debugger.resume');
     return await waitPromise;
+  }
+
+  /**
+   * 멈춤만 해제하고 응답 즉시 반환 (다음 paused 대기 안 함).
+   *
+   * @remarks
+   * 영원히 안 멈출 수도 있는 서버 같은 케이스용.
+   * entry pause 풀어 서버 부팅 시작시키고, breakpoint는 그 후 걸고, 외부에서 요청 보낸 뒤
+   * `waitForNextPause()`로 다음 멈춤 확인하는 흐름.
+   */
+  public async resumeOnly(): Promise<{ wasPaused: boolean }> {
+    if (this.exited) return { wasPaused: false };
+    if (!this.currentPaused) return { wasPaused: false };
+    await this.sendCdp('Debugger.resume');
+    return { wasPaused: true };
+  }
+
+  /**
+   * 현재 paused면 즉시 반환, 아니면 다음 paused 또는 종료까지 대기.
+   * 옵션 timeoutMs를 주면 그 시간 안에 안 멈추면 'running' 반환.
+   */
+  public async waitForNextPause(timeoutMs?: number): Promise<PausedInfo | null | 'timeout'> {
+    if (this.exited) return null;
+    if (this.currentPaused) return this.currentPaused;
+    if (!timeoutMs) return await this.waitForPaused();
+    return await new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        // pausedWaiters에서 자기 자신 제거
+        const idx = this.pausedWaiters.indexOf(handler);
+        if (idx >= 0) this.pausedWaiters.splice(idx, 1);
+        resolve('timeout');
+      }, timeoutMs);
+      const handler = (p: PausedInfo | null): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(p);
+      };
+      this.pausedWaiters.push(handler);
+    });
   }
 
   /** 다음 paused 이벤트 또는 종료까지 대기. */

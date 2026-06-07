@@ -1,6 +1,6 @@
 {
   "name": "@popsapple/nd",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Minimal CDP-based Node.js debugger CLI — works with tsx, esbuild, and any source-mapped Node app",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "docs",
     "README.md",
     "LICENSE"
   ],

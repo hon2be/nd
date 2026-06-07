@@ -117,6 +117,36 @@ async function main(): Promise<void> {
       await passThrough(socketPath, { cmd: 'ping' });
       break;
     }
+    case 'preset': {
+      // nd preset <path-to-json>
+      const path = rest[1];
+      if (!path) { process.stderr.write('usage: nd preset <path-to-json>\n예: [{"file":"src/x.ts","line":42,"label":"after-fetch"}]\n'); process.exit(1); }
+      let raw: string;
+      try {
+        const { readFileSync } = await import('node:fs');
+        raw = readFileSync(path, 'utf-8');
+      } catch (e) {
+        process.stderr.write(`[nd] cannot read preset file: ${e instanceof Error ? e.message : String(e)}\n`);
+        process.exit(1);
+      }
+      let items: unknown;
+      try { items = JSON.parse(raw); } catch (e) {
+        process.stderr.write(`[nd] invalid JSON in preset: ${e instanceof Error ? e.message : String(e)}\n`);
+        process.exit(1);
+      }
+      if (!Array.isArray(items)) {
+        process.stderr.write('[nd] preset JSON must be an array of {file,line,condition?,label?}\n');
+        process.exit(1);
+      }
+      await passThrough(socketPath, { cmd: 'preset', args: { items }});
+      break;
+    }
+    case 'unbreak': {
+      const id = rest[1];
+      if (!id) { process.stderr.write('usage: nd unbreak <breakpointId>\n'); process.exit(1); }
+      await passThrough(socketPath, { cmd: 'unbreak', args: { id }});
+      break;
+    }
     case 'break': {
       // 형식: nd break <file>:<line> [--if "<expr>"]
       const spec = rest[1];
@@ -144,6 +174,17 @@ async function main(): Promise<void> {
     }
     case 'continue': {
       await passThrough(socketPath, { cmd: 'continue' });
+      break;
+    }
+    case 'resume': {
+      await passThrough(socketPath, { cmd: 'resume' });
+      break;
+    }
+    case 'wait': {
+      let timeoutMs: number | undefined;
+      const ti = rest.indexOf('--timeout');
+      if (ti >= 0 && rest[ti + 1]) timeoutMs = Number(rest[ti + 1]) * 1000;
+      await passThrough(socketPath, { cmd: 'wait', args: timeoutMs ? { timeoutMs } : {} });
       break;
     }
     case 'step': {

@@ -112,6 +112,31 @@ async function main(): Promise<void> {
           return { status: 'ok', data: { count: matched.length, total: all.length, scripts: matched.slice(0, 20) }};
         }
 
+        case 'unbreak': {
+          const id = req.args?.['id'] as string | undefined;
+          if (!id) return { status: 'error', message: 'unbreak requires args.id' };
+          await cdp.removeBreakpoint(id);
+          return { status: 'ok', data: { removed: id }};
+        }
+
+        case 'preset': {
+          // 여러 breakpoint를 한 번에 등록. args.items: [{file, line, condition?, label?}]
+          const items = req.args?.['items'] as Array<{ file: string; line: number; condition?: string; label?: string }> | undefined;
+          if (!Array.isArray(items)) return { status: 'error', message: 'preset requires args.items: [{file,line,condition?,label?}]' };
+          const results: Array<{ label?: string; file: string; line: number; ok: boolean; breakpointId?: string; resolvedLine?: number; error?: string }> = [];
+          for (const it of items) {
+            const absFile = isAbsolute(it.file) ? it.file : resolve(baseCwd, it.file);
+            try {
+              const r = await cdp.setBreakpoint(absFile, it.line, it.condition);
+              results.push({ label: it.label, file: absFile, line: it.line, ok: true, breakpointId: r.id, resolvedLine: r.resolvedLine });
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              results.push({ label: it.label, file: absFile, line: it.line, ok: false, error: msg });
+            }
+          }
+          return { status: 'ok', data: { applied: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results }};
+        }
+
         case 'break': {
           const file = req.args?.['file'] as string | undefined;
           const line = req.args?.['line'] as number | undefined;
@@ -126,6 +151,21 @@ async function main(): Promise<void> {
           const p = await cdp.continueAndWait();
           if (!p) return { status: 'ok', data: { exited: true, exit: cdp.getExitState() }};
           return { status: 'ok', data: { paused: summarizePaused(p) }};
+        }
+
+        case 'resume': {
+          // 멈춤만 해제, 다음 paused 안 기다림. 서버 같은 long-running 케이스용.
+          const r = await cdp.resumeOnly();
+          return { status: 'ok', data: r };
+        }
+
+        case 'wait': {
+          // 이미 paused면 즉시 반환, 아니면 timeoutMs (기본 30000) 안에 다음 paused 또는 'running'.
+          const timeoutMs = (req.args?.['timeoutMs'] as number | undefined) ?? 30_000;
+          const r = await cdp.waitForNextPause(timeoutMs);
+          if (r === 'timeout') return { status: 'ok', data: { running: true }};
+          if (!r) return { status: 'ok', data: { exited: true, exit: cdp.getExitState() }};
+          return { status: 'ok', data: { paused: summarizePaused(r) }};
         }
 
         case 'step': {
