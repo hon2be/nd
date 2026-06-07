@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# nd entry point — runs src/cli.ts via node + tsx loader.
+
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+exec node --import tsx "$ROOT/src/cli.ts" "$@"
